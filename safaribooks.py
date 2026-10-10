@@ -18,7 +18,12 @@ from multiprocessing import Process, Queue, Value
 from urllib.parse import urljoin, urlparse, parse_qs, quote_plus
 
 
-PATH = os.path.dirname(os.path.realpath(__file__))
+if getattr(sys, "frozen", False):
+    # PyInstaller one-file: __file__ points into the temp _MEI* dir,
+    # so resolve writable files (cookies.json, Books/, logs) next to the exe.
+    PATH = os.path.dirname(sys.executable)
+else:
+    PATH = os.path.dirname(os.path.realpath(__file__))
 COOKIES_FILE = os.path.join(PATH, "cookies.json")
 
 ORLY_BASE_HOST = "oreilly.com"  # PLEASE INSERT URL HERE
@@ -200,7 +205,7 @@ class Display:
                   self.SH_BG_RED + "[!]" + self.SH_DEFAULT + " Bye!!")
 
     @staticmethod
-    def api_error(response):
+    def api_error(response, cookies_file=COOKIES_FILE):
         message = "API: "
         detail = ""
         if isinstance(response, dict):
@@ -215,9 +220,9 @@ class Display:
                        "    `" + SAFARI_BASE_URL + "/library/view/book-name/XXXXXXXXXXXXX/`"
 
         else:
-            if os.path.isfile(COOKIES_FILE):
+            if os.path.isfile(cookies_file):
                 try:
-                    os.remove(COOKIES_FILE)
+                    os.remove(cookies_file)
                 except OSError:
                     pass
             suffix = ""
@@ -415,6 +420,10 @@ class SafariBooks:
 
     def __init__(self, args):
         self.args = args
+        if getattr(args, "cookies", None):
+            self.cookies_file = os.path.abspath(os.path.expanduser(args.cookies))
+        else:
+            self.cookies_file = COOKIES_FILE
         self.display = Display("info_%s.log" % escape(args.bookid))
         self.display.intro()
 
@@ -428,12 +437,13 @@ class SafariBooks:
         self.jwt = {}
 
         if not args.cred:
-            if not os.path.isfile(COOKIES_FILE):
-                self.display.exit("Login: unable to find `cookies.json` file.\n"
-                                  "    Please use the `--cred` or `--login` options to perform the login.")
+            if not os.path.isfile(self.cookies_file):
+                self.display.exit("Login: unable to find cookies file `%s`.\n"
+                                  "    Please use the `--cred` or `--login` options to perform the login."
+                                  % self.cookies_file)
 
             try:
-                self.session.cookies.update(load_cookies_file(COOKIES_FILE))
+                self.session.cookies.update(load_cookies_file(self.cookies_file))
             except ValueError as exc:
                 self.display.exit("Login: %s" % exc)
 
@@ -441,7 +451,7 @@ class SafariBooks:
             self.display.info("Logging into Safari Books Online...", state=True)
             self.do_login(*args.cred)
             if not args.no_cookies:
-                json.dump(self.session.cookies.get_dict(), open(COOKIES_FILE, 'w'))
+                json.dump(self.session.cookies.get_dict(), open(self.cookies_file, 'w'))
 
         self.check_login()
 
@@ -515,7 +525,7 @@ class SafariBooks:
         self.create_epub()
 
         if not args.no_cookies:
-            json.dump(self.session.cookies.get_dict(), open(COOKIES_FILE, "w"))
+            json.dump(self.session.cookies.get_dict(), open(self.cookies_file, "w"))
 
         self.display.done(os.path.join(self.BOOK_PATH, self.book_id + ".epub"))
         self.display.unregister()
@@ -674,7 +684,7 @@ class SafariBooks:
                 payload = response.json()
             except Exception:
                 payload = {"detail": "HTTP %s" % response.status_code}
-            self.display.exit(self.display.api_error(payload))
+            self.display.exit(self.display.api_error(payload, self.cookies_file))
         try:
             return response.json()
         except Exception as exc:
@@ -709,7 +719,7 @@ class SafariBooks:
         epub_url = self.EPUB_URL_TEMPLATE.format(self.book_id)
         epub = self._fetch_json(epub_url, "book info")
         if not isinstance(epub, dict) or "title" not in epub:
-            self.display.exit(self.display.api_error(epub if isinstance(epub, dict) else {}))
+            self.display.exit(self.display.api_error(epub if isinstance(epub, dict) else {}, self.cookies_file))
 
         # Authors / publishers / web_url live in metadata + talent APIs.
         authors = []
@@ -1345,7 +1355,7 @@ class SafariBooks:
                 toc = payload["results"]
             elif len(payload.keys()) == 1:
                 self.display.exit(
-                    self.display.api_error(payload) +
+                    self.display.api_error(payload, self.cookies_file) +
                     " Don't delete any files, just run again this program"
                     " in order to complete the `.epub` creation!"
                 )
@@ -1414,6 +1424,11 @@ if __name__ == "__main__":
     arguments.add_argument(
         "--no-cookies", dest="no_cookies", action='store_true',
         help="Prevent your session data to be saved into `cookies.json` file."
+    )
+    arguments.add_argument(
+        "--cookies", metavar="<PATH>", dest="cookies", default=None,
+        help="Path to the `cookies.json` session file. Defaults to `cookies.json`"
+             " next to the program."
     )
     arguments.add_argument(
         "--kindle", dest="kindle", action='store_true',

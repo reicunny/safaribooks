@@ -1,11 +1,20 @@
+import argparse
 import json
+import os
+import sys
 
 # See: https://github.com/lorenzodifuccia/safaribooks/issues/358
 
 try:
-    from safaribooks import COOKIES_FILE
+    from safaribooks import COOKIES_FILE as DEFAULT_COOKIES_FILE
 except ImportError:
-    COOKIES_FILE = "cookies.json"
+    if getattr(sys, "frozen", False):
+        DEFAULT_COOKIES_FILE = os.path.join(os.path.dirname(sys.executable), "cookies.json")
+    else:
+        DEFAULT_COOKIES_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), "cookies.json")
+
+# Kept for backward compatibility (imported by name elsewhere).
+COOKIES_FILE = DEFAULT_COOKIES_FILE
 
 try:
     import browser_cookie3
@@ -27,10 +36,24 @@ def get_oreilly_cookies():
     return cookies
 
 def main():
+    parser = argparse.ArgumentParser(
+        prog="retrieve_cookies.py",
+        description="Export O'Reilly session cookies to a cookies.json file.",
+    )
+    parser.add_argument(
+        "--output", "--cookies", dest="output", metavar="<PATH>", default=DEFAULT_COOKIES_FILE,
+        help="Where to write the cookies file. Defaults to `cookies.json` next to the program.",
+    )
+    args = parser.parse_args()
+
+    output = os.path.abspath(os.path.expanduser(args.output))
+    parent = os.path.dirname(output)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     cookies = get_oreilly_cookies()
-    with open(COOKIES_FILE, "w") as f:
+    with open(output, "w") as f:
         json.dump(cookies, f)
-    print(f"Cookies saved to {COOKIES_FILE}")
+    print(f"Cookies saved to {output}")
 
 if __name__ == "__main__":
     main()

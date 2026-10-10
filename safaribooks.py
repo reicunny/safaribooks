@@ -202,14 +202,32 @@ class Display:
     @staticmethod
     def api_error(response):
         message = "API: "
-        if "detail" in response and "Not found" in response["detail"]:
+        detail = ""
+        if isinstance(response, dict):
+            detail = str(response.get("detail", "") or response.get("message", ""))
+        elif isinstance(response, str):
+            detail = response
+        # v1: "Not found..."; v2: "No EpubArchive matches the given query.",
+        # "{ "message": "Not Found" }".
+        if detail and any(s in detail for s in ("Not found", "Not Found", "No EpubArchive")):
             message += "book's not present in Safari Books Online.\n" \
                        "    The book identifier is the digits that you can find in the URL:\n" \
                        "    `" + SAFARI_BASE_URL + "/library/view/book-name/XXXXXXXXXXXXX/`"
 
         else:
-            os.remove(COOKIES_FILE)
-            message += "Out-of-Session%s.\n" % (" (%s)" % response["detail"]) if "detail" in response else "" + \
+            if os.path.isfile(COOKIES_FILE):
+                try:
+                    os.remove(COOKIES_FILE)
+                except OSError:
+                    pass
+            suffix = ""
+            if isinstance(response, dict):
+                raw = response.get("detail", "") or response.get("message", "")
+                if raw:
+                    suffix = " (%s)" % raw
+            elif isinstance(response, str) and response.strip():
+                suffix = " (%s)" % response.strip()[:200]
+            message += "Out-of-Session%s.\n" % suffix + \
                        Display.SH_YELLOW + "[+]" + Display.SH_DEFAULT + \
                        " Use the `--cred` or `--login` options in order to perform the auth login to Safari."
 
@@ -229,6 +247,15 @@ class SafariBooks:
     LOGIN_ENTRY_URL = SAFARI_BASE_URL + "/login/unified/?next=/home/"
 
     API_TEMPLATE = SAFARI_BASE_URL + "/api/v1/book/{0}/"
+
+    # v2 API (current). Old v1 /api/v1/book/{id}/ now returns 404.
+    EPUB_URL_TEMPLATE = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/"
+    EPUB_FILES_TEMPLATE = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/files/"
+    EPUB_SPINE_TEMPLATE = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/spine/"
+    EPUB_TOC_TEMPLATE = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/table-of-contents/"
+    EPUB_CHAPTERS_TEMPLATE = SAFARI_BASE_URL + "/api/v2/epub-chapters/?epub_identifier=urn:orm:book:{0}"
+    METADATA_TEMPLATE = SAFARI_BASE_URL + "/api/v2/metadata/?ourn=urn%3Aorm%3Abook%3A{0}&limit=1"
+    TALENT_TEMPLATE = SAFARI_BASE_URL + "/api/v1/talent/work/urn:orm:book:{0}"
 
     BASE_01_HTML = "<!DOCTYPE html>\n" \
                    "<html lang=\"en\" xml:lang=\"en\" xmlns=\"http://www.w3.org/1999/xhtml\"" \
@@ -299,12 +326,15 @@ class SafariBooks:
               "</ncx>"
 
     HEADERS = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "Accept": "application/json, text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
         "Accept-Encoding": "gzip, deflate",
-        "Referer": LOGIN_ENTRY_URL,
+        "Referer": SAFARI_BASE_URL + "/",
         "Upgrade-Insecure-Requests": "1",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/90.0.4430.212 Safari/537.36"
+        "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": "\"Linux\"",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "HeadlessChrome/155.0.0.0 Safari/537.36"
     }
 
     COOKIE_FLOAT_MAX_AGE_PATTERN = re.compile(r'(max-age=\d*\.\d*)', re.IGNORECASE)
@@ -376,23 +406,26 @@ class SafariBooks:
         self.images = []
 
         self.display.info("Downloading book contents... (%s chapters)" % len(self.book_chapters), state=True)
-        self.BASE_HTML = self.BASE_01_HTML + (self.KINDLE_HTML if not args.kindle else "") + self.BASE_02_HTML
+        self.BASE_HTML = self.BASE_01_HTML + (self.KINDLE_HTML if args.kindle else "") + self.BASE_02_HTML
 
         self.cover = False
         self.get()
         if not self.cover:
-            self.cover = self.get_default_cover() if "cover" in self.book_info else False
-            cover_html = self.parse_html(
-                html.fromstring("<div id=\"sbo-rt-content\"><img src=\"Images/{0}\"></div>".format(self.cover)), True
-            )
+            self.cover = self.get_default_cover() if self.book_info.get("cover") else False
+            if self.cover:
+                cover_html = self.parse_html(
+                    html.fromstring("<div id=\"sbo-rt-content\"><img src=\"Images/{0}\"></div>".format(self.cover)), True
+                )
 
-            self.book_chapters = [{
-                "filename": "default_cover.xhtml",
-                "title": "Cover"
-            }] + self.book_chapters
+                self.book_chapters = [{
+                    "filename": "default_cover.xhtml",
+                    "title": "Cover"
+                }] + self.book_chapters
 
-            self.filename = self.book_chapters[0]["filename"]
-            self.save_page_html(cover_html)
+                self.filename = self.book_chapters[0]["filename"]
+                self.save_page_html(cover_html)
+            else:
+                self.display.log("No cover found; continuing without default cover.")
 
         self.css_done_queue = Queue(0) if "win" not in sys.platform else WinQueue()
         self.display.info("Downloading book CSSs... (%s files)" % len(self.css), state=True)
@@ -414,11 +447,16 @@ class SafariBooks:
             os.remove(self.display.log_file)
 
     def handle_cookie_update(self, set_cookie_headers):
+        if not set_cookie_headers:
+            return
         for morsel in set_cookie_headers:
-            # Handle Float 'max-age' Cookie
-            if self.COOKIE_FLOAT_MAX_AGE_PATTERN.search(morsel):
-                cookie_key, cookie_value = morsel.split(";")[0].split("=")
-                self.session.cookies.set(cookie_key, cookie_value)
+            try:
+                # Handle Float 'max-age' Cookie
+                if self.COOKIE_FLOAT_MAX_AGE_PATTERN.search(morsel):
+                    cookie_key, cookie_value = morsel.split(";")[0].split("=", 1)
+                    self.session.cookies.set(cookie_key.strip(), cookie_value.strip())
+            except (ValueError, AttributeError):
+                continue
 
     def requests_provider(self, url, is_post=False, data=None, perform_redirect=True, **kwargs):
         try:
@@ -426,15 +464,29 @@ class SafariBooks:
                 url,
                 data=data,
                 allow_redirects=False,
+                timeout=kwargs.pop("timeout", 30),
                 **kwargs
             )
 
-            self.handle_cookie_update(response.raw.headers.getlist("Set-Cookie"))
+            try:
+                raw_headers = response.raw.headers
+                set_cookies = raw_headers.getlist("Set-Cookie") if hasattr(raw_headers, "getlist") else None
+                if set_cookies is None:
+                    # Fallback for urllib3 v2 / requests versions without getlist.
+                    set_cookies = response.headers.get("Set-Cookie")
+                    set_cookies = [set_cookies] if set_cookies else []
+                self.handle_cookie_update(set_cookies)
+            except Exception as exc:
+                self.display.log("Cookie update skipped: %s" % exc)
 
+            try:
+                body_preview = response.text
+            except Exception:
+                body_preview = "<unreadable body>"
             self.display.last_request = (
                 url, data, kwargs, response.status_code, "\n".join(
                     ["\t{}: {}".format(*h) for h in response.headers.items()]
-                ), response.text
+                ), body_preview
             )
 
         except (requests.ConnectionError, requests.ConnectTimeout, requests.RequestException) as request_exception:
@@ -442,8 +494,15 @@ class SafariBooks:
             return 0
 
         if response.is_redirect and perform_redirect:
-            return self.requests_provider(response.next.url, is_post, None, perform_redirect)
-            # TODO How about **kwargs?
+            redirect_url = response.headers.get("Location")
+            if not redirect_url:
+                try:
+                    redirect_url = response.next.url
+                except Exception:
+                    redirect_url = None
+            if not redirect_url:
+                return response
+            return self.requests_provider(urljoin(url, redirect_url), is_post, None, perform_redirect, **kwargs)
 
         return response
 
@@ -529,55 +588,172 @@ class SafariBooks:
 
         self.display.info("Successfully authenticated.", state=True)
 
-    def get_book_info(self):
-        response = self.requests_provider(self.api_url)
+    def _fetch_json(self, url, what):
+        response = self.requests_provider(url, headers={"Accept": "application/json"})
         if response == 0:
-            self.display.exit("API: unable to retrieve book info.")
+            self.display.exit("API: unable to retrieve %s." % what)
+        if response.status_code != 200:
+            try:
+                payload = response.json()
+            except Exception:
+                payload = {"detail": "HTTP %s" % response.status_code}
+            self.display.exit(self.display.api_error(payload))
+        try:
+            return response.json()
+        except Exception as exc:
+            self.display.error(str(exc))
+            self.display.exit("API: unable to parse %s response." % what)
 
-        response = response.json()
-        if not isinstance(response, dict) or len(response.keys()) == 1:
-            self.display.exit(self.display.api_error(response))
+    def _fetch_paginated(self, url, what):
+        results = []
+        next_url = url
+        while next_url:
+            payload = self._fetch_json(next_url, what)
+            if isinstance(payload, list):
+                results.extend(payload)
+                break
+            batch = payload.get("results", [])
+            results.extend(batch)
+            next_url = payload.get("next")
+        return results
 
-        if "last_chapter_read" in response:
-            del response["last_chapter_read"]
+    @staticmethod
+    def _filename_from_reference(reference_id, ourn=""):
+        if reference_id and "/" in reference_id:
+            return reference_id.split("/")[-1]
+        if reference_id:
+            return reference_id
+        if ourn:
+            return ourn.split(":")[-1]
+        return ""
 
-        for key, value in response.items():
+    def get_book_info(self):
+        ourn = "urn:orm:book:{0}".format(self.book_id)
+        epub_url = self.EPUB_URL_TEMPLATE.format(self.book_id)
+        epub = self._fetch_json(epub_url, "book info")
+        if not isinstance(epub, dict) or "title" not in epub:
+            self.display.exit(self.display.api_error(epub if isinstance(epub, dict) else {}))
+
+        # Authors / publishers / web_url live in metadata + talent APIs.
+        authors = []
+        publishers = []
+        web_url = SAFARI_BASE_URL + "/library/view/-/{0}/".format(self.book_id)
+        description = ""
+        subjects = []
+        try:
+            meta = self._fetch_json(self.METADATA_TEMPLATE.format(self.book_id), "book metadata")
+            if isinstance(meta, dict) and meta.get("results"):
+                m0 = meta["results"][0]
+                if m0.get("description", {}).get("text/html"):
+                    description = m0["description"]["text/html"]
+                talent = m0.get("talent", {})
+                for c in talent.get("contributors", []):
+                    if c.get("name"):
+                        authors.append({"name": c["name"]})
+                for p in m0.get("publishers", []):
+                    if p.get("name"):
+                        publishers.append({"name": p["name"]})
+                if m0.get("web_url"):
+                    web_url = urljoin(SAFARI_BASE_URL, m0["web_url"])
+                for t in m0.get("topics", []):
+                    if t.get("name"):
+                        subjects.append({"name": t["name"]})
+        except SystemExit:
+            raise
+        except Exception as exc:
+            self.display.log("Metadata fallback failed: %s" % exc)
+
+        if not authors:
+            try:
+                talent_list = self._fetch_json(self.TALENT_TEMPLATE.format(self.book_id), "book talent")
+                if isinstance(talent_list, list):
+                    for c in talent_list:
+                        if c.get("name"):
+                            authors.append({"name": c["name"]})
+            except SystemExit:
+                raise
+            except Exception as exc:
+                self.display.log("Talent fallback failed: %s" % exc)
+
+        if not description:
+            descs = epub.get("descriptions", {}) or {}
+            description = descs.get("text/html", "") or descs.get("text/plain", "")
+
+        info = {
+            "title": epub.get("title", "n/a"),
+            "authors": authors or [{"name": "n/a"}],
+            "identifier": epub.get("identifier", self.book_id),
+            "isbn": epub.get("isbn", self.book_id),
+            "publishers": publishers or [{"name": "n/a"}],
+            "rights": "Copyright (c) O'Reilly Media, Inc.",
+            "description": description or "n/a",
+            "issued": epub.get("publication_date", "n/a"),
+            "web_url": web_url,
+            "subjects": subjects,
+            "language": epub.get("language", "en"),
+            "cover": SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/files/assets/cover.png".format(self.book_id),
+        }
+        for key, value in info.items():
             if value is None:
-                response[key] = 'n/a'
-
-        return response
+                info[key] = "n/a"
+        return info
 
     def get_book_chapters(self, page=1):
-        response = self.requests_provider(urljoin(self.api_url, "chapter/?page=%s" % page))
-        if response == 0:
+        # v2 uses limit/offset on spine + epub-chapters; ignore legacy page arg.
+        spine_url = self.EPUB_SPINE_TEMPLATE.format(self.book_id) + "?limit=100"
+        spine = self._fetch_paginated(spine_url, "book chapters")
+        if not spine:
             self.display.exit("API: unable to retrieve book chapters.")
 
-        response = response.json()
-
-        if not isinstance(response, dict) or len(response.keys()) == 1:
-            self.display.exit(self.display.api_error(response))
-
-        if "results" not in response or not len(response["results"]):
-            self.display.exit("API: unable to retrieve book chapters.")
-
-        if response["count"] > sys.getrecursionlimit():
-            sys.setrecursionlimit(response["count"])
+        chapters_url = self.EPUB_CHAPTERS_TEMPLATE.format(self.book_id) + "&limit=100"
+        details_list = self._fetch_paginated(chapters_url, "book chapter details")
+        details_by_ourn = {d.get("ourn"): d for d in details_list if d.get("ourn")}
+        files_base = self.EPUB_FILES_TEMPLATE.format(self.book_id).rstrip("/")
 
         result = []
-        result.extend([c for c in response["results"] if "cover" in c["filename"] or "cover" in c["title"]])
-        for c in result:
-            del response["results"][response["results"].index(c)]
+        for entry in spine:
+            ourn = entry.get("ourn", "")
+            reference_id = entry.get("reference_id", "")
+            filename = self._filename_from_reference(reference_id, ourn)
+            if not filename:
+                continue
+            title = entry.get("title", filename)
+            content_url = files_base + "/" + filename
+            detail = details_by_ourn.get(ourn, {})
+            related = detail.get("related_assets", {}) if isinstance(detail, dict) else {}
+            images = related.get("images", []) or []
+            stylesheets = [{"url": u} for u in (related.get("stylesheets", []) or [])]
+            result.append({
+                "filename": filename,
+                "title": title,
+                "content": content_url,
+                "asset_base_url": files_base,
+                "images": images,
+                "stylesheets": stylesheets,
+                "site_styles": [],
+            })
 
-        result += response["results"]
-        return result + (self.get_book_chapters(page + 1) if response["next"] else [])
+        if len(result) > sys.getrecursionlimit():
+            sys.setrecursionlimit(len(result))
+
+        # Keep cover first for legacy cover detection.
+        covers = [c for c in result if "cover" in c["filename"].lower() or "cover" in c["title"].lower()]
+        others = [c for c in result if c not in covers]
+        return covers + others
 
     def get_default_cover(self):
         response = self.requests_provider(self.book_info["cover"], stream=True)
-        if response == 0:
+        if response == 0 or response.status_code != 200:
             self.display.error("Error trying to retrieve the cover: %s" % self.book_info["cover"])
             return False
 
-        file_ext = response.headers["Content-Type"].split("/")[-1]
+        content_type = response.headers.get("Content-Type", "image/png")
+        file_ext = content_type.split("/")[-1].split(";")[0].strip() or "png"
+        # Normalize jpeg extension.
+        if file_ext == "jpeg":
+            file_ext = "jpg"
+        if len(file_ext) > 4 or "/" in file_ext:
+            file_ext = "png"
         with open(os.path.join(self.images_path, "default_cover." + file_ext), 'wb') as i:
             for chunk in response.iter_content(1024):
                 i.write(chunk)
@@ -616,16 +792,22 @@ class SafariBooks:
     def link_replace(self, link):
         if link and not link.startswith("mailto"):
             if not self.url_is_absolute(link):
-                if any(x in link for x in ["cover", "images", "graphics"]) or \
+                # v2 asset URLs look like /api/v2/epubs/urn:orm:book:{id}/files/assets/x.png
+                if any(x in link for x in ["cover", "images", "graphics", "assets", "/api/v2/epubs/"]) or \
                         self.is_image_link(link):
-                    image = link.split("/")[-1]
-                    return "Images/" + image
+                    image = link.split("/")[-1].split("?")[0].split("#")[0]
+                    if image:
+                        return "Images/" + image
 
-                return link.replace(".html", ".xhtml")
+                return link.split("?")[0].split("#")[0].replace(".html", ".xhtml")
 
             else:
                 if self.book_id in link:
                     return self.link_replace(link.split(self.book_id)[-1])
+                # Absolute v2 file URL on the same host: strip to filename.
+                parsed = urlparse(link)
+                if parsed.netloc.endswith("oreilly.com") and "/api/v2/epubs/" in link:
+                    return self.link_replace(parsed.path)
 
         return link
 
@@ -653,10 +835,7 @@ class SafariBooks:
         return None
 
     def parse_html(self, root, first_page=False):
-        if random() > 0.8:
-            if len(root.xpath("//div[@class='controls']/a/text()")):
-                self.display.exit(self.display.api_error(" "))
-
+        # NOTE: legacy random session-expiry probe removed; v2 uses JWT cookies.
         book_content = root.xpath("//div[@id='sbo-rt-content']")
         if not len(book_content):
             self.display.exit(
@@ -812,27 +991,46 @@ class SafariBooks:
             self.chapter_title = next_chapter["title"]
             self.filename = next_chapter["filename"]
 
-            asset_base_url = next_chapter['asset_base_url']
-            api_v2_detected = False
-            if 'v2' in next_chapter['content']:
-                asset_base_url = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{}/files".format(self.book_id)
-                api_v2_detected = True
+            asset_base_url = next_chapter.get('asset_base_url', "")
+            api_v2_detected = 'v2' in next_chapter.get('content', "")
 
             if "images" in next_chapter and len(next_chapter["images"]):
                 for img_url in next_chapter['images']:
-                    if api_v2_detected:
-                        self.images.append(asset_base_url + '/' + img_url)
+                    if not img_url:
+                        continue
+                    # v2 related_assets are absolute URLs; keep them as-is.
+                    if self.url_is_absolute(img_url):
+                        self.images.append(img_url)
+                    elif api_v2_detected:
+                        base = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{}/files".format(self.book_id)
+                        # img_url may be a bare filename from legacy data.
+                        if img_url.startswith("assets/") or "/" not in img_url:
+                            self.images.append(base + '/' + img_url.lstrip("/"))
+                        else:
+                            self.images.append(urljoin(base + "/", img_url))
                     else:
                         self.images.append(urljoin(next_chapter['asset_base_url'], img_url))
 
 
-            # Stylesheets
+            # Stylesheets (v2 gives list of {"url": ...} or plain strings)
             self.chapter_stylesheets = []
             if "stylesheets" in next_chapter and len(next_chapter["stylesheets"]):
-                self.chapter_stylesheets.extend(x["url"] for x in next_chapter["stylesheets"])
+                for entry in next_chapter["stylesheets"]:
+                    if isinstance(entry, dict):
+                        url = entry.get("url", "")
+                    else:
+                        url = entry
+                    if url:
+                        self.chapter_stylesheets.append(url)
 
             if "site_styles" in next_chapter and len(next_chapter["site_styles"]):
-                self.chapter_stylesheets.extend(next_chapter["site_styles"])
+                for entry in next_chapter["site_styles"]:
+                    if isinstance(entry, dict):
+                        url = entry.get("url", "")
+                    else:
+                        url = entry
+                    if url:
+                        self.chapter_stylesheets.append(url)
 
             if os.path.isfile(os.path.join(self.BOOK_PATH, "OEBPS", self.filename.replace(".html", ".xhtml"))):
                 if not self.display.book_ad_info and \
@@ -863,8 +1061,11 @@ class SafariBooks:
 
         else:
             response = self.requests_provider(url)
-            if response == 0:
+            if response == 0 or response.status_code != 200:
                 self.display.error("Error trying to retrieve this CSS: %s\n    From: %s" % (css_file, url))
+                self.css_done_queue.put(1)
+                self.display.state(len(self.css), self.css_done_queue.qsize())
+                return
 
             with open(css_file, 'wb') as s:
                 s.write(response.content)
@@ -874,7 +1075,10 @@ class SafariBooks:
 
 
     def _thread_download_images(self, url):
-        image_name = url.split("/")[-1]
+        image_name = url.split("/")[-1].split("?")[0].split("#")[0]
+        if not image_name:
+            self.display.error("Error trying to retrieve this image (empty name): %s" % url)
+            return
         image_path = os.path.join(self.images_path, image_name)
         if os.path.isfile(image_path):
             if not self.display.images_ad_info.value and url not in self.images[:self.images.index(url)]:
@@ -886,9 +1090,13 @@ class SafariBooks:
                 self.display.images_ad_info.value = 1
 
         else:
-            response = self.requests_provider(urljoin(SAFARI_BASE_URL, url), stream=True)
-            if response == 0:
+            # urljoin keeps absolute https URLs; resolves /api/... against host.
+            fetch_url = url if self.url_is_absolute(url) else urljoin(SAFARI_BASE_URL, url)
+            response = self.requests_provider(fetch_url, stream=True)
+            if response == 0 or response.status_code != 200:
                 self.display.error("Error trying to retrieve this image: %s\n    From: %s" % (image_name, url))
+                self.images_done_queue.put(1)
+                self.display.state(len(self.images), self.images_done_queue.qsize())
                 return
 
             with open(image_path, 'wb') as img:
@@ -973,29 +1181,66 @@ class SafariBooks:
             ", ".join(escape(pub.get("name", "")) for pub in self.book_info.get("publishers", [])),
             escape(self.book_info.get("rights", "")),
             self.book_info.get("issued", ""),
-            self.cover,
+            escape(str(self.cover)) if self.cover else "cover",
             "\n".join(manifest),
             "\n".join(spine),
             self.book_chapters[0]["filename"].replace(".html", ".xhtml")
         )
 
     @staticmethod
+    def _normalize_toc_entry(entry):
+        # Accept both v1 (label/href/id) and v2 (title/reference_id/ourn) shapes.
+        if "label" in entry or "href" in entry or "id" in entry:
+            return entry
+        reference_id = entry.get("reference_id", "")
+        filename = reference_id.split("/")[-1] if "/" in reference_id else reference_id
+        if not filename and entry.get("ourn"):
+            filename = entry["ourn"].split(":")[-1]
+        return {
+            "depth": entry.get("depth", 1),
+            "label": entry.get("title", filename),
+            "href": filename or "index.html",
+            "fragment": entry.get("fragment", ""),
+            "id": entry.get("ourn", "") or entry.get("fragment", "") or filename,
+            "children": [SafariBooks._normalize_toc_entry(c) for c in (entry.get("children") or [])],
+        }
+
+    @staticmethod
     def parse_toc(l, c=0, mx=0):
         r = ""
-        for cc in l:
+        for raw in l:
+            cc = SafariBooks._normalize_toc_entry(raw) if "label" not in raw else raw
             c += 1
-            if int(cc["depth"]) > mx:
-                mx = int(cc["depth"])
+            try:
+                depth = int(cc.get("depth", 1))
+            except (TypeError, ValueError):
+                depth = 1
+            if depth > mx:
+                mx = depth
 
+            node_id = cc.get("fragment") or cc.get("id") or "ch%d" % c
+            filename = (cc.get("href", "") or "").replace(".html", ".xhtml").split("/")[-1]
+            fragment = cc.get("fragment", "")
+            # Preserve in-page anchors like upstream toc.ncx (file.html#fragment).
+            if fragment and "#" not in filename:
+                # Avoid duplicating when filename already is a bare anchor.
+                content_src = "%s#%s" % (filename, fragment) if filename else "#%s" % fragment
+                # Top-level entries whose fragment is a section id still resolve
+                # inside the same file; child entries share the parent file.
+                # If fragment equals the file stem heuristic, keep file-only for
+                # the top node to match legacy behaviour? No: upstream includes it.
+            else:
+                content_src = filename
             r += "<navPoint id=\"{0}\" playOrder=\"{1}\">" \
                  "<navLabel><text>{2}</text></navLabel>" \
                  "<content src=\"{3}\"/>".format(
-                    cc["fragment"] if len(cc["fragment"]) else cc["id"], c,
-                    escape(cc["label"]), cc["href"].replace(".html", ".xhtml").split("/")[-1]
+                    escape(str(node_id)), c,
+                    escape(str(cc.get("label", ""))), escape(content_src)
                  )
 
-            if cc["children"]:
-                sr, c, mx = SafariBooks.parse_toc(cc["children"], c, mx)
+            children = cc.get("children") or []
+            if children:
+                sr, c, mx = SafariBooks.parse_toc(children, c, mx)
                 r += sr
 
             r += "</navPoint>\n"
@@ -1003,22 +1248,38 @@ class SafariBooks:
         return r, c, mx
 
     def create_toc(self):
-        response = self.requests_provider(urljoin(self.api_url, "toc/"))
+        toc_url = self.EPUB_TOC_TEMPLATE.format(self.book_id)
+        response = self.requests_provider(toc_url, headers={"Accept": "application/json"})
         if response == 0:
             self.display.exit("API: unable to retrieve book chapters. "
                               "Don't delete any files, just run again this program"
                               " in order to complete the `.epub` creation!")
 
-        response = response.json()
+        try:
+            payload = response.json()
+        except Exception as exc:
+            self.display.error(str(exc))
+            self.display.exit("API: unable to retrieve book chapters. "
+                              "Don't delete any files, just run again this program"
+                              " in order to complete the `.epub` creation!")
 
-        if not isinstance(response, list) and len(response.keys()) == 1:
-            self.display.exit(
-                self.display.api_error(response) +
-                " Don't delete any files, just run again this program"
-                " in order to complete the `.epub` creation!"
-            )
+        if isinstance(payload, dict):
+            if "results" in payload:
+                toc = payload["results"]
+            elif len(payload.keys()) == 1:
+                self.display.exit(
+                    self.display.api_error(payload) +
+                    " Don't delete any files, just run again this program"
+                    " in order to complete the `.epub` creation!"
+                )
+            else:
+                self.display.exit("API: unexpected table-of-contents format.")
+        elif isinstance(payload, list):
+            toc = payload
+        else:
+            self.display.exit("API: unexpected table-of-contents format.")
 
-        navmap, _, max_depth = self.parse_toc(response)
+        navmap, _, max_depth = self.parse_toc(toc)
         return self.TOC_NCX.format(
             (self.book_info["isbn"] if self.book_info["isbn"] else self.book_id),
             max_depth,

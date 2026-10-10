@@ -242,6 +242,80 @@ class WinQueue(list):  # TODO: error while use `process` in Windows: can't pickl
         return self.__len__()
 
 
+def load_cookies_file(path):
+    """Load cookies.json in console or script format.
+
+    Accepted:
+      - dict: {"orm-jwt": "...", "orm-rt": "...", ...} (console snippet and
+        retrieve_cookies.py both produce this)
+      - list: [{"name": "...", "value": "..."}, ...] (common cookie exporters)
+
+    Returns a plain {name: value} dict. Raises ValueError with an actionable
+    message instead of a raw JSONDecodeError.
+    """
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            raw = f.read()
+    except OSError as exc:
+        raise ValueError("unable to read `%s`: %s" % (path, exc))
+
+    if not raw.strip():
+        raise ValueError("`%s` is empty" % path)
+
+    text = raw.strip()
+    # Tolerate a doubly-stringified file, e.g. file literally contains
+    # '"{...}"' because the console output was pasted with outer quotes.
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"' and "orm-jwt" in text:
+        try:
+            text = json.loads(text)
+        except ValueError:
+            pass
+
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ValueError(
+            "invalid JSON in `%s`: %s\n"
+            "    This usually means the console output was truncated while copying\n"
+            "    (e.g. `Unterminated string ... char 3144` means the file ends mid-value).\n"
+            "    Re-copy the full console output (use right-click > Copy, not manual\n"
+            "    selection), or use the Blob-download snippet from issue #358, or run\n"
+            "    `python3 retrieve_cookies.py` instead. Validate with:\n"
+            "        python3 -m json.tool cookies.json" % (path, exc)
+        )
+
+    if isinstance(data, dict):
+        cookies = data
+    elif isinstance(data, list):
+        cookies = {}
+        for entry in data:
+            if isinstance(entry, dict) and "name" in entry:
+                cookies[str(entry["name"])] = str(entry.get("value", ""))
+            else:
+                raise ValueError(
+                    "unsupported list entry in `%s`: %r\n"
+                    "    Expected [{\"name\": ..., \"value\": ...}, ...] or {\"name\": value}."
+                    % (path, entry)
+                )
+    else:
+        raise ValueError(
+            "unsupported format in `%s`: expected a JSON object or a name/value list."
+            % path
+        )
+
+    # Normalize values to strings; drop empty names.
+    normalized = {}
+    for name, value in cookies.items():
+        if not name:
+            continue
+        normalized[str(name)] = value if isinstance(value, str) else str(value)
+
+    if not normalized:
+        raise ValueError("no usable cookies found in `%s`" % path)
+
+    return normalized
+
+
 class SafariBooks:
     LOGIN_URL = ORLY_BASE_URL + "/member/auth/login/"
     LOGIN_ENTRY_URL = SAFARI_BASE_URL + "/login/unified/?next=/home/"
@@ -358,7 +432,10 @@ class SafariBooks:
                 self.display.exit("Login: unable to find `cookies.json` file.\n"
                                   "    Please use the `--cred` or `--login` options to perform the login.")
 
-            self.session.cookies.update(json.load(open(COOKIES_FILE)))
+            try:
+                self.session.cookies.update(load_cookies_file(COOKIES_FILE))
+            except ValueError as exc:
+                self.display.exit("Login: %s" % exc)
 
         else:
             self.display.info("Logging into Safari Books Online...", state=True)

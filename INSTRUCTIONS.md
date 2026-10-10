@@ -21,11 +21,15 @@ Requires `python3`, Chrome or Firefox.
 
 ## 3. Export session to `cookies.json`
 
+Preferred method:
+
 ```shell
 python3 retrieve_cookies.py
 ```
 
 This reads O'Reilly cookies from your browser and writes `cookies.json` in this folder. It needs `browser-cookie3` (already in `requirements.txt`).
+
+Alternative (browser console): on a logged-in `learning.oreilly.com` page, run the snippet from issue #358 in DevTools Console, then save the printed JSON as `cookies.json`. Both methods produce the same `{"name": value}` format, and both are accepted. A cookie-exporter file shaped like `[{"name": ..., "value": ...}]` is also accepted.
 
 Notes:
 - If the browser blocks cookie access, close the browser completely and run the command again.
@@ -65,6 +69,7 @@ python3 safaribooks.py --preserve-log 9781491958698
 ## 6. Troubleshooting
 
 - `Login: unable to find cookies.json`: you skipped step 3.
+- `Login: invalid JSON in ... Unterminated string ...`: your `cookies.json` was truncated while copying from the console (char 3144 means it ends mid-value). Re-copy the full output with right-click > Copy, use the Blob-download snippet from issue #358, or run `python3 retrieve_cookies.py`. Check with `python3 -m json.tool cookies.json`.
 - `Authentication issue: unable to access profile page`: session invalid. Repeat steps 2-3.
 - `API: Out-of-Session`: session expired. Repeat steps 2-3.
 - `API: book's not present...`: wrong ID or book not in your subscription.

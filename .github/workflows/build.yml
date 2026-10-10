@@ -1,0 +1,54 @@
+name: Build executables
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: safaribooks-linux
+          - os: windows-latest
+            artifact_name: safaribooks-windows
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build one-file executables with PyInstaller
+        run: |
+          python -m PyInstaller --onefile --name safaribooks safaribooks.py
+          python -m PyInstaller --onefile --name retrieve-cookies retrieve_cookies.py
+
+      - name: Smoke test executables
+        shell: bash
+        run: |
+          ls -lh dist/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ./dist/safaribooks.exe --help
+          else
+            ./dist/safaribooks --help
+          fi
+
+      - name: Upload executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*

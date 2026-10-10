@@ -12,3 +12,8 @@ cookies.json
 *.log
 *.txt
 *.code-workspace
+
+# PyInstaller build outputs
+dist/
+build/
+*.spec

@@ -13,10 +13,17 @@ except ImportError:
     raise ImportError("Please run this program via: uv run --with browser_cookie3 python retrieve_cookies.py")
 
 def get_oreilly_cookies():
-    cj = browser_cookie3.load()
+    # Only export O'Reilly cookies; browser_cookie3.load() without a filter
+    # would dump every site's cookies and collapse duplicate names.
+    # orm-jwt + orm-rt are the session tokens safaribooks.py actually needs.
+    cj = browser_cookie3.load(domain_name="oreilly.com")
     cookies = {}
     for c in cj:
-        cookies[c.name] = c.value
+        domain = getattr(c, "domain", "") or ""
+        if "oreilly.com" not in domain:
+            continue
+        # Keep first value on duplicate names across subdomains.
+        cookies.setdefault(c.name, c.value)
     return cookies
 
 def main():

@@ -59,7 +59,7 @@ class Display:
 
         self.logger = logging.getLogger("SafariBooks")
         self.logger.setLevel(logging.INFO)
-        logs_handler = logging.FileHandler(filename=self.log_file)
+        logs_handler = logging.FileHandler(filename=self.log_file, encoding="utf-8")
         logs_handler.setFormatter(self.BASE_FORMAT)
         logs_handler.setLevel(logging.INFO)
         self.logger.addHandler(logs_handler)
@@ -87,21 +87,43 @@ class Display:
         sys.excepthook = sys.__excepthook__
 
     def log(self, message):
+        if isinstance(message, bytes):
+            try:
+                message = message.decode("utf-8", "replace")
+            except Exception:
+                message = repr(message)
+        else:
+            try:
+                message = str(message)
+            except Exception:
+                message = repr(message)
         try:
-            self.logger.info(str(message, "utf-8", "replace"))
-
-        except (UnicodeDecodeError, Exception):
             self.logger.info(message)
+        except Exception:
+            try:
+                self.logger.info(message.encode("ascii", "replace").decode("ascii"))
+            except Exception:
+                pass
 
     def out(self, put):
         pattern = "\r{!s}\r{!s}\n"
+        if isinstance(put, bytes):
+            try:
+                put = put.decode("utf-8", "replace")
+            except Exception:
+                put = repr(put)
+        s = pattern.format(" " * self.columns, put)
+
         try:
-            s = pattern.format(" " * self.columns, str(put, "utf-8", "replace"))
-
-        except TypeError:
-            s = pattern.format(" " * self.columns, put)
-
-        sys.stdout.write(s)
+            sys.stdout.write(s)
+        except UnicodeEncodeError:
+            # Windows consoles (cp1252/cp850) can't encode chars like 'ł' (U+0142).
+            # Fall back to replacement chars instead of crashing the download.
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            try:
+                sys.stdout.write(s.encode(encoding, "replace").decode(encoding))
+            except Exception:
+                sys.stdout.write(s.encode("ascii", "replace").decode("ascii"))
 
     def info(self, message, state=False):
         self.log(message)

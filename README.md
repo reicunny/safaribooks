@@ -43,12 +43,13 @@ requests>=2.20.0
 ```
   
 ## Usage:
-It's really simple to use, just choose a book from the library and replace in the following command:
-  * X-es with its ID, 
-  * `email:password` with your own. 
+Authentication uses a `cookies.json` session file (see
+[INSTRUCTIONS.md](INSTRUCTIONS.md), or run `python3 retrieve_cookies.py`
+to export it from your logged-in browser). Then choose a book from the
+library and replace the X-es with its ID:
 
 ```shell
-$ python3 safaribooks.py --cred "account_mail@mail.com:password01" XXXXXXXXXXXXX
+$ python3 safaribooks.py XXXXXXXXXXXXX
 ```
 
 The ID is the digits that you find in the URL of the book description page:  
@@ -58,8 +59,8 @@ Like: `https://www.safaribooksonline.com/library/view/test-driven-development-wi
 #### Program options:
 ```shell
 $ python3 safaribooks.py --help
-usage: safaribooks.py [--cred <EMAIL:PASS> | --login] [--no-cookies]
-                      [--kindle] [--preserve-log] [--help]
+usage: safaribooks.py [--cookies <PATH>] [--kindle] [--preserve-log]
+                      [--help]
                       <BOOK ID>
 
 Download and generate an EPUB of your favorite books from Safari Books Online.
@@ -71,13 +72,8 @@ positional arguments:
                        name/XXXXXXXXXXXXX/`
 
 optional arguments:
-  --cred <EMAIL:PASS>  Credentials used to perform the auth login on Safari
-                       Books Online. Es. ` --cred
-                       "account_mail@mail.com:password01" `.
-  --login              Prompt for credentials used to perform the auth login
-                       on Safari Books Online.
-  --no-cookies         Prevent your session data to be saved into
-                       `cookies.json` file.
+  --cookies <PATH>   Path to the `cookies.json` session file. Defaults to
+                     `cookies.json` next to the program.
   --kindle             Add some CSS rules that block overflow on `table` and
                        `pre` elements. Use this option if you're going to
                        export the EPUB to E-Readers like Amazon Kindle.
@@ -86,14 +82,14 @@ optional arguments:
   --help               Show this help message.
 ```
   
-The first time you use the program, you'll have to specify your Safari Books Online account credentials (look [`here`](/../../issues/15) for special character).  
-The next times you'll download a book, before session expires, you can omit the credential, because the program save your session cookies in a file called `cookies.json`.  
-For **SSO**, please use the `sso_cookies.py` program in order to create the `cookies.json` file from the SSO cookies retrieved by your browser session (please follow [`these steps`](/../../issues/150#issuecomment-555423085)).  
-  
-Pay attention if you use a shared PC, because everyone that has access to your files can steal your session. 
-If you don't want to cache the cookies, just use the `--no-cookies` option and provide all time your credential through the `--cred` option or the more safe `--login` one: this will prompt you for credential during the script execution.
+The program saves your session cookies back into `cookies.json` on every
+run, so repeat downloads work until the session expires. If a download
+says `Out-of-Session`, just re-export `cookies.json` from your logged-in
+browser (see [INSTRUCTIONS.md](INSTRUCTIONS.md)).
 
-You can configure proxies by setting on your system the environment variable `HTTPS_PROXY` or using the `USE_PROXY` directive into the script.
+Pay attention if you use a shared PC, because everyone that has access to your files can steal your session.
+
+You can configure proxies by setting on your system the environment variable `HTTPS_PROXY`.
 
 #### Calibre EPUB conversion
 **Important**: since the script only download HTML pages and create a raw EPUB, many of the CSS and XML/HTML directives are wrong for an E-Reader. To ensure best quality of the output, I suggest you to always convert the `EPUB` obtained by the script to standard-`EPUB` with [Calibre](https://calibre-ebook.com/).
@@ -111,7 +107,7 @@ In this case, I suggest you to convert the `EPUB` to `AZW3` with Calibre or to `
 ## Examples:
   * ## Download [Test-Driven Development with Python, 2nd Edition](https://www.safaribooksonline.com/library/view/test-driven-development-with/9781491958698/):  
     ```shell
-    $ python3 safaribooks.py --cred "my_email@gmail.com:MyPassword1!" 9781491958698
+    $ python3 safaribooks.py 9781491958698
 
            ____     ___         _ 
           / __/__ _/ _/__ _____(_)
@@ -122,7 +118,7 @@ In this case, I suggest you to convert the `EPUB` to `AZW3` with Calibre or to `
         /____/\___/\___/_/\_\/___/
 
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    [-] Logging into Safari Books Online...
+    [-] Successfully authenticated.
     [*] Retrieving book info... 
     [-] Title: Test-Driven Development with Python, 2nd Edition                     
     [-] Authors: Harry J.W. Percival                                                

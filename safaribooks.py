@@ -6,7 +6,6 @@ import sys
 import json
 import shutil
 import pathlib
-import getpass
 import logging
 import argparse
 import requests
@@ -14,8 +13,8 @@ import traceback
 from html import escape
 from random import random
 from lxml import html, etree
-from multiprocessing import Process, Queue, Value
-from urllib.parse import urljoin, urlparse, parse_qs, quote_plus
+from multiprocessing import Queue, Value
+from urllib.parse import urljoin, urlparse
 
 
 if getattr(sys, "frozen", False):
@@ -29,16 +28,9 @@ COOKIES_FILE = os.path.join(PATH, "cookies.json")
 ORLY_BASE_HOST = "oreilly.com"  # PLEASE INSERT URL HERE
 
 SAFARI_BASE_HOST = "learning." + ORLY_BASE_HOST
-API_ORIGIN_HOST = "api." + ORLY_BASE_HOST
 
-ORLY_BASE_URL = "https://www." + ORLY_BASE_HOST
 SAFARI_BASE_URL = "https://" + SAFARI_BASE_HOST
-API_ORIGIN_URL = "https://" + API_ORIGIN_HOST
 PROFILE_URL = SAFARI_BASE_URL + "/profile/"
-
-# DEBUG
-USE_PROXY = False
-PROXIES = {"https": "https://127.0.0.1:8080"}
 
 
 class Display:
@@ -256,7 +248,9 @@ class Display:
                 suffix = " (%s)" % response.strip()[:200]
             message += "Out-of-Session%s.\n" % suffix + \
                        Display.SH_YELLOW + "[+]" + Display.SH_DEFAULT + \
-                       " Use the `--cred` or `--login` options in order to perform the auth login to Safari."
+                       " Your session expired. Re-export `cookies.json` from your logged-in" + \
+                       " browser (see INSTRUCTIONS.md, or run `python3 retrieve_cookies.py`)" + \
+                       " and try again."
 
         return message
 
@@ -344,11 +338,6 @@ def load_cookies_file(path):
 
 
 class SafariBooks:
-    LOGIN_URL = ORLY_BASE_URL + "/member/auth/login/"
-    LOGIN_ENTRY_URL = SAFARI_BASE_URL + "/login/unified/?next=/home/"
-
-    API_TEMPLATE = SAFARI_BASE_URL + "/api/v1/book/{0}/"
-
     # v2 API (current). Old v1 /api/v1/book/{id}/ now returns 404.
     EPUB_URL_TEMPLATE = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/"
     EPUB_FILES_TEMPLATE = SAFARI_BASE_URL + "/api/v2/epubs/urn:orm:book:{0}/files/"
@@ -450,35 +439,22 @@ class SafariBooks:
         self.display.intro()
 
         self.session = requests.Session()
-        if USE_PROXY:  # DEBUG
-            self.session.proxies = PROXIES
-            self.session.verify = False
-
         self.session.headers.update(self.HEADERS)
 
-        self.jwt = {}
+        if not os.path.isfile(self.cookies_file):
+            self.display.exit("Login: unable to find cookies file `%s`.\n"
+                              "    Export it from your logged-in browser — see INSTRUCTIONS.md"
+                              " (or run `python3 retrieve_cookies.py`)."
+                              % self.cookies_file)
 
-        if not args.cred:
-            if not os.path.isfile(self.cookies_file):
-                self.display.exit("Login: unable to find cookies file `%s`.\n"
-                                  "    Please use the `--cred` or `--login` options to perform the login."
-                                  % self.cookies_file)
-
-            try:
-                self.session.cookies.update(load_cookies_file(self.cookies_file))
-            except ValueError as exc:
-                self.display.exit("Login: %s" % exc)
-
-        else:
-            self.display.info("Logging into Safari Books Online...", state=True)
-            self.do_login(*args.cred)
-            if not args.no_cookies:
-                json.dump(self.session.cookies.get_dict(), open(self.cookies_file, 'w'))
+        try:
+            self.session.cookies.update(load_cookies_file(self.cookies_file))
+        except ValueError as exc:
+            self.display.exit("Login: %s" % exc)
 
         self.check_login()
 
         self.book_id = args.bookid
-        self.api_url = self.API_TEMPLATE.format(self.book_id)
 
         self.display.info("Retrieving book info...")
         self.book_info = self.get_book_info()
@@ -546,8 +522,7 @@ class SafariBooks:
         self.display.info("Creating EPUB file...", state=True)
         self.create_epub()
 
-        if not args.no_cookies:
-            json.dump(self.session.cookies.get_dict(), open(self.cookies_file, "w"))
+        json.dump(self.session.cookies.get_dict(), open(self.cookies_file, "w"))
 
         self.display.done(os.path.join(self.BOOK_PATH, self.book_id + ".epub"))
         self.display.unregister()
@@ -614,74 +589,6 @@ class SafariBooks:
             return self.requests_provider(urljoin(url, redirect_url), is_post, None, perform_redirect, **kwargs)
 
         return response
-
-    @staticmethod
-    def parse_cred(cred):
-        if ":" not in cred:
-            return False
-
-        sep = cred.index(":")
-        new_cred = ["", ""]
-        new_cred[0] = cred[:sep].strip("'").strip('"')
-        if "@" not in new_cred[0]:
-            return False
-
-        new_cred[1] = cred[sep + 1:]
-        return new_cred
-
-    def do_login(self, email, password):
-        response = self.requests_provider(self.LOGIN_ENTRY_URL)
-        if response == 0:
-            self.display.exit("Login: unable to reach Safari Books Online. Try again...")
-
-        next_parameter = None
-        try:
-            next_parameter = parse_qs(urlparse(response.request.url).query)["next"][0]
-
-        except (AttributeError, ValueError, IndexError):
-            self.display.exit("Login: unable to complete login on Safari Books Online. Try again...")
-
-        redirect_uri = API_ORIGIN_URL + quote_plus(next_parameter)
-
-        response = self.requests_provider(
-            self.LOGIN_URL,
-            is_post=True,
-            json={
-                "email": email,
-                "password": password,
-                "redirect_uri": redirect_uri
-            },
-            perform_redirect=False
-        )
-
-        if response == 0:
-            self.display.exit("Login: unable to perform auth to Safari Books Online.\n    Try again...")
-
-        if response.status_code != 200:  # TODO To be reviewed
-            try:
-                error_page = html.fromstring(response.text)
-                errors_message = error_page.xpath("//ul[@class='errorlist']//li/text()")
-                recaptcha = error_page.xpath("//div[@class='g-recaptcha']")
-                messages = (["    `%s`" % error for error in errors_message
-                             if "password" in error or "email" in error] if len(errors_message) else []) + \
-                           (["    `ReCaptcha required (wait or do logout from the website).`"] if len(
-                               recaptcha) else [])
-                self.display.exit(
-                    "Login: unable to perform auth login to Safari Books Online.\n" + self.display.SH_YELLOW +
-                    "[*]" + self.display.SH_DEFAULT + " Details:\n" + "%s" % "\n".join(
-                        messages if len(messages) else ["    Unexpected error!"])
-                )
-            except (html.etree.ParseError, html.etree.ParserError) as parsing_error:
-                self.display.error(parsing_error)
-                self.display.exit(
-                    "Login: your login went wrong and it encountered in an error"
-                    " trying to parse the login details of Safari Books Online. Try again..."
-                )
-
-        self.jwt = response.json()  # TODO: save JWT Tokens and use the refresh_token to restore user session
-        response = self.requests_provider(self.jwt["redirect_uri"])
-        if response == 0:
-            self.display.exit("Login: unable to reach Safari Books Online. Try again...")
 
     def check_login(self):
         response = self.requests_provider(PROFILE_URL, perform_redirect=False)
@@ -1231,23 +1138,9 @@ class SafariBooks:
         self.images_done_queue.put(1)
         self.display.state(len(self.images), self.images_done_queue.qsize())
 
-    def _start_multiprocessing(self, operation, full_queue):
-        if len(full_queue) > 5:
-            for i in range(0, len(full_queue), 5):
-                self._start_multiprocessing(operation, full_queue[i:i + 5])
-
-        else:
-            process_queue = [Process(target=operation, args=(arg,)) for arg in full_queue]
-            for proc in process_queue:
-                proc.start()
-
-            for proc in process_queue:
-                proc.join()
-
     def collect_css(self):
         self.display.state_status.value = -1
 
-        # "self._start_multiprocessing" seems to cause problem. Switching to mono-thread download.
         for css_url in self.css:
             self._thread_download_css(css_url)
 
@@ -1260,7 +1153,6 @@ class SafariBooks:
 
         self.display.state_status.value = -1
 
-        # "self._start_multiprocessing" seems to cause problem. Switching to mono-thread download.
         for image_url in self.images:
             self._thread_download_images(image_url)
 
@@ -1448,21 +1340,6 @@ if __name__ == "__main__":
                                         add_help=False,
                                         allow_abbrev=False)
 
-    login_arg_group = arguments.add_mutually_exclusive_group()
-    login_arg_group.add_argument(
-        "--cred", metavar="<EMAIL:PASS>", default=False,
-        help="Credentials used to perform the auth login on Safari Books Online."
-             " Es. ` --cred \"account_mail@mail.com:password01\" `."
-    )
-    login_arg_group.add_argument(
-        "--login", action='store_true',
-        help="Prompt for credentials used to perform the auth login on Safari Books Online."
-    )
-
-    arguments.add_argument(
-        "--no-cookies", dest="no_cookies", action='store_true',
-        help="Prevent your session data to be saved into `cookies.json` file."
-    )
     arguments.add_argument(
         "--cookies", metavar="<PATH>", dest="cookies", default=None,
         help="Path to the `cookies.json` session file. Defaults to `cookies.json`"
@@ -1485,36 +1362,6 @@ if __name__ == "__main__":
     )
 
     args_parsed = arguments.parse_args()
-    if args_parsed.cred or args_parsed.login:
-        print("WARNING: Due to recent changes on ORLY website, \n" \
-                "the `--cred` and `--login` options are temporarily disabled.\n"
-                "    Please use the `cookies.json` file to authenticate your account.\n"
-                "    See: https://github.com/lorenzodifuccia/safaribooks/issues/358")
-        arguments.exit()
-        
-        # user_email = ""
-        # pre_cred = ""
-
-        # if args_parsed.cred:
-        #     pre_cred = args_parsed.cred
-
-        # else:
-        #     user_email = input("Email: ")
-        #     passwd = getpass.getpass("Password: ")
-        #     pre_cred = user_email + ":" + passwd
-
-        # parsed_cred = SafariBooks.parse_cred(pre_cred)
-
-        # if not parsed_cred:
-        #     arguments.error("invalid credential: %s" % (
-        #         args_parsed.cred if args_parsed.cred else (user_email + ":*******")
-        #     ))
-
-        # args_parsed.cred = parsed_cred
-
-    else:
-        if args_parsed.no_cookies:
-            arguments.error("invalid option: `--no-cookies` is valid only if you use the `--cred` option")
 
     SafariBooks(args_parsed)
     # Hint: do you want to download more then one book once, initialized more than one instance of `SafariBooks`...

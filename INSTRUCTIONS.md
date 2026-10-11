@@ -1,6 +1,6 @@
 # Instructions: Download a Book
 
-You only need your O'Reilly email and password. Do not use `--cred` / `--login`; they are disabled. Authentication uses a `cookies.json` session file.
+You only need your O'Reilly email and password. Authentication uses a `cookies.json` session file exported from your logged-in browser.
 
 ## 1. Setup
 

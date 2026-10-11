@@ -727,14 +727,24 @@ class SafariBooks:
         return results
 
     @staticmethod
-    def _filename_from_reference(reference_id, ourn=""):
-        if reference_id and "/" in reference_id:
-            return reference_id.split("/")[-1]
+    def _path_from_reference(reference_id, ourn=""):
+        # reference_id looks like '<bookid>-/Text/titlepage.xhtml' or
+        # '<bookid>-/content/cover.xhtml'. The part after '-/' is the path
+        # inside the EPUB archive and must be preserved in /files/ URLs.
+        if reference_id and "-/" in reference_id:
+            return reference_id.split("-/", 1)[1].lstrip("/")
         if reference_id:
-            return reference_id
+            return reference_id.lstrip("/")
         if ourn:
-            return ourn.split(":")[-1]
+            return ourn.split(":")[-1].lstrip("/")
         return ""
+
+    @staticmethod
+    def _filename_from_reference(reference_id, ourn=""):
+        path = SafariBooks._path_from_reference(reference_id, ourn)
+        if "/" in path:
+            return path.split("/")[-1]
+        return path
 
     def get_book_info(self):
         ourn = "urn:orm:book:{0}".format(self.book_id)
@@ -823,12 +833,18 @@ class SafariBooks:
         for entry in spine:
             ourn = entry.get("ourn", "")
             reference_id = entry.get("reference_id", "")
-            filename = self._filename_from_reference(reference_id, ourn)
+            file_path = self._path_from_reference(reference_id, ourn)
+            filename = file_path.split("/")[-1] if file_path else ""
             if not filename:
                 continue
             title = entry.get("title", filename)
-            content_url = files_base + "/" + filename
             detail = details_by_ourn.get(ourn, {})
+            # Prefer the API's content_url (includes the archive subdir,
+            # e.g. files/Text/titlepage.xhtml). Basename-only URLs 404 with
+            # "No EpubFile matches the given query."
+            content_url = detail.get("content_url") if isinstance(detail, dict) else None
+            if not content_url:
+                content_url = files_base + "/" + file_path
             related = detail.get("related_assets", {}) if isinstance(detail, dict) else {}
             images = related.get("images", []) or []
             stylesheets = [{"url": u} for u in (related.get("stylesheets", []) or [])]

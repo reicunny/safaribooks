@@ -355,5 +355,89 @@ class EscapeDirnameTests(unittest.TestCase):
         self.assertNotIn(":", SafariBooks.escape_dirname("A Very Long Title Prefix: Sub"))
 
 
+class BatchIdsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = self._tmp.name
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_bytes(self, name, data):
+        path = os.path.join(self.tmpdir, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def test_multiple_ids_pass_through(self):
+        from safaribooks import collect_book_ids
+        self.assertEqual(
+            collect_book_ids(["0642572230302", "9798341623590", "9781836207474"]),
+            ["0642572230302", "9798341623590", "9781836207474"],
+        )
+
+    def test_duplicates_removed_preserving_order(self):
+        from safaribooks import collect_book_ids
+        self.assertEqual(
+            collect_book_ids(["0642572230302", "9781836207474", "0642572230302"]),
+            ["0642572230302", "9781836207474"],
+        )
+
+    def test_ids_file_lf(self):
+        from safaribooks import collect_book_ids, load_ids_from_file
+        path = self._write_bytes("IDs_LF.txt", b"0642572230302\n9781836207474\n9781836207474\n")
+        self.assertEqual(
+            load_ids_from_file(path),
+            ["0642572230302", "9781836207474", "9781836207474"],
+        )
+        # collect_* de-duplicates the repeated line from the example.
+        self.assertEqual(collect_book_ids([path]), ["0642572230302", "9781836207474"])
+
+    def test_ids_file_crlf(self):
+        from safaribooks import load_ids_from_file
+        path = self._write_bytes("IDs_CRLF.txt", b"0642572230302\r\n9781836207474\r\n9781836207474\r\n")
+        self.assertEqual(
+            load_ids_from_file(path),
+            ["0642572230302", "9781836207474", "9781836207474"],
+        )
+
+    def test_ids_file_cr_only(self):
+        from safaribooks import load_ids_from_file
+        path = self._write_bytes("IDs_CR.txt", b"0642572230302\r9781836207474\r9781836207474\r")
+        self.assertEqual(
+            load_ids_from_file(path),
+            ["0642572230302", "9781836207474", "9781836207474"],
+        )
+
+    def test_ids_file_skips_blank_and_whitespace(self):
+        from safaribooks import collect_book_ids
+        path = self._write_bytes("IDs_mix.txt", b"  0642572230302  \r\n\n   \r\n9781836207474\r\n")
+        self.assertEqual(collect_book_ids([path]), ["0642572230302", "9781836207474"])
+
+    def test_mixed_cli_and_file(self):
+        from safaribooks import collect_book_ids
+        path = self._write_bytes("IDs.txt", b"9781836207474\n")
+        self.assertEqual(
+            collect_book_ids(["0642572230302", path, "9798341623590", path]),
+            ["0642572230302", "9781836207474", "9798341623590"],
+        )
+
+    def test_missing_txt_file_rejected(self):
+        from safaribooks import collect_book_ids
+        with self.assertRaises(ValueError):
+            collect_book_ids([os.path.join(self.tmpdir, "missing.txt")])
+
+    def test_empty_ids_file_rejected(self):
+        from safaribooks import collect_book_ids
+        path = self._write_bytes("empty.txt", b"  \n \r\n")
+        with self.assertRaises(ValueError):
+            collect_book_ids([path])
+
+    def test_no_ids_rejected(self):
+        from safaribooks import collect_book_ids
+        with self.assertRaises(ValueError):
+            collect_book_ids([])
+
+
 if __name__ == "__main__":
     unittest.main()

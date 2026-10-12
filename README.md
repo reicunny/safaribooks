@@ -61,15 +61,17 @@ Like: `https://www.safaribooksonline.com/library/view/test-driven-development-wi
 $ python3 safaribooks.py --help
 usage: safaribooks.py [--cookies <PATH>] [--kindle] [--preserve-log]
                       [--help]
-                      <BOOK ID>
+                      <BOOK ID> [<BOOK ID> ...]
 
 Download and generate an EPUB of your favorite books from Safari Books Online.
 
 positional arguments:
-  <BOOK ID>            Book digits ID that you want to download. You can find
-                       it in the URL (X-es):
+  <BOOK ID>            One or more book digits IDs that you want to download.
+                       You can find them in the URL (X-es):
                        `https://learning.oreilly.com/library/view/book-
-                       name/XXXXXXXXXXXXX/`
+                       name/XXXXXXXXXXXXX/` Alternatively, pass a text file
+                       with one ID per line (e.g. `python safaribooks.py
+                       IDs.txt`).
 
 optional arguments:
   --cookies <PATH>   Path to the `cookies.json` session file. Defaults to
@@ -80,6 +82,14 @@ optional arguments:
   --preserve-log       Leave the `info_XXXXXXXXXXXXX.log` file even if there
                        isn't any error.
   --help               Show this help message.
+```
+
+You can download several books in one run, and/or pass a text file with
+one ID per line (blank lines ignored, duplicates skipped, `LF`/`CRLF`/`CR`
+all handled):
+```shell
+$ python3 safaribooks.py 0642572230302 9798341623590 9781836207474
+$ python3 safaribooks.py IDs.txt
 ```
   
 The program saves your session cookies back into `cookies.json` on every

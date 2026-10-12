@@ -55,6 +55,7 @@ class Display:
         logs_handler.setFormatter(self.BASE_FORMAT)
         logs_handler.setLevel(logging.INFO)
         self.logger.addHandler(logs_handler)
+        self.logs_handler = logs_handler
 
         self.columns, _ = shutil.get_terminal_size()
 
@@ -75,8 +76,23 @@ class Display:
         self.output_dir_set = True
 
     def unregister(self):
-        self.logger.handlers[0].close()
-        sys.excepthook = sys.__excepthook__
+        try:
+            handler = getattr(self, "logs_handler", None)
+            if handler is not None:
+                try:
+                    self.logger.removeHandler(handler)
+                finally:
+                    try:
+                        handler.close()
+                    except Exception:
+                        pass
+            elif self.logger.handlers:
+                try:
+                    self.logger.handlers[0].close()
+                except Exception:
+                    pass
+        finally:
+            sys.excepthook = sys.__excepthook__
 
     def log(self, message):
         if isinstance(message, bytes):
@@ -144,6 +160,10 @@ class Display:
         self.out(output)
 
         self.save_last_request()
+        try:
+            self.unregister()
+        except Exception:
+            pass
         sys.exit(1)
 
     def unhandled_exception(self, _, o, tb):
@@ -335,6 +355,81 @@ def load_cookies_file(path):
         raise ValueError("no usable cookies found in `%s`" % path)
 
     return normalized
+
+
+def load_ids_from_file(path):
+    """Read book IDs from a text file, one per line.
+
+    Uses universal newlines (``newline=None``) so ``\\n`` (Unix),
+    ``\\r\\n`` (Windows) and ``\\r`` (legacy Mac) are all handled, and
+    ``utf-8-sig`` so a BOM is stripped. Blank/whitespace-only lines are
+    skipped; remaining lines are stripped and returned in file order.
+
+    Raises ValueError with an actionable message on I/O errors.
+    """
+    try:
+        with open(path, "r", encoding="utf-8-sig", newline=None) as f:
+            content = f.read()
+    except OSError as exc:
+        raise ValueError("unable to read IDs file `%s`: %s" % (path, exc))
+
+    ids = []
+    for line in content.splitlines():
+        token = line.strip().strip("\ufeff").strip()
+        if token:
+            ids.append(token)
+    return ids
+
+
+def collect_book_ids(raw_values):
+    """Expand CLI values into an ordered, de-duplicated list of book IDs.
+
+    Each value is either a book ID or a path to a text file containing one
+    ID per line (detected via ``os.path.isfile``). This allows::
+
+        python safaribooks.py 0642572230302 9798341623590 9781836207474
+        python safaribooks.py IDs.txt
+        python safaribooks.py 0642572230302 IDs.txt 9781836207474
+
+    A value that looks like a file path (ends with ``.txt`` or contains a
+    path separator) but does not exist raises ValueError instead of being
+    silently treated as a book ID, to catch typos. Duplicates (including
+    those from the example file listing the same ID twice) are skipped,
+    preserving first-seen order.
+    """
+    if not raw_values:
+        raise ValueError("no book IDs provided")
+
+    ids = []
+    seen = set()
+    for value in raw_values:
+        if not isinstance(value, str):
+            value = str(value)
+        candidates = []
+        if os.path.isfile(value):
+            candidates = load_ids_from_file(value)
+            if not candidates:
+                raise ValueError("IDs file `%s` contains no book IDs" % value)
+        elif value.lower().endswith(".txt") or os.path.sep in value or (
+            os.path.altsep and os.path.altsep in value
+        ):
+            raise ValueError("IDs file not found: `%s`" % value)
+        else:
+            token = value.strip().strip("\ufeff").strip()
+            if token:
+                candidates = [token]
+
+        for candidate in candidates:
+            token = candidate.strip().strip("\ufeff").strip()
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            ids.append(token)
+
+    if not ids:
+        raise ValueError("no book IDs provided")
+
+    return ids
 
 
 class SafariBooks:
@@ -1356,13 +1451,62 @@ if __name__ == "__main__":
     )
     arguments.add_argument("--help", action="help", default=argparse.SUPPRESS, help='Show this help message.')
     arguments.add_argument(
-        "bookid", metavar='<BOOK ID>',
-        help="Book digits ID that you want to download. You can find it in the URL (X-es):"
+        "bookid", metavar='<BOOK ID>', nargs="+",
+        help="One or more book digits IDs that you want to download. You can find them in the URL (X-es):"
              " `" + SAFARI_BASE_URL + "/library/view/book-name/XXXXXXXXXXXXX/`"
+             " Alternatively, pass a text file with one ID per line (e.g. `python safaribooks.py IDs.txt`)."
     )
 
     args_parsed = arguments.parse_args()
 
-    SafariBooks(args_parsed)
-    # Hint: do you want to download more then one book once, initialized more than one instance of `SafariBooks`...
+    try:
+        book_ids = collect_book_ids(args_parsed.bookid)
+    except ValueError as exc:
+        arguments.error(str(exc))
+
+    failures = []
+    total = len(book_ids)
+    for index, book_id in enumerate(book_ids, 1):
+        args_parsed.bookid = book_id
+        if total > 1:
+            sys.stdout.write("\n=== Book {0}/{1}: {2} ===\n".format(index, total, book_id))
+            sys.stdout.flush()
+        try:
+            SafariBooks(args_parsed)
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+            if code != 0:
+                failures.append(book_id)
+                # Display.exit() already closed its own log handler, but be
+                # defensive so a leaked handler never contaminates the next book.
+                try:
+                    _logger = logging.getLogger("SafariBooks")
+                    for _h in list(_logger.handlers):
+                        try:
+                            _h.close()
+                        except Exception:
+                            pass
+                        try:
+                            _logger.removeHandler(_h)
+                        except Exception:
+                            pass
+                finally:
+                    sys.excepthook = sys.__excepthook__
+                if index < total:
+                    continue
+            else:
+                # sys.exit(0) from inside should not happen; treat as success.
+                pass
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keep batch going, report at end
+            try:
+                sys.stderr.write("Error downloading book `%s`: %s\n" % (book_id, exc))
+            except Exception:
+                pass
+            failures.append(book_id)
+
+    if failures:
+        sys.stderr.write("Failed downloads (%d/%d): %s\n" % (len(failures), total, ", ".join(failures)))
+        sys.exit(1)
     sys.exit(0)
